@@ -1,0 +1,160 @@
+#!/usr/bin/env -S qjs --module
+
+/* qjs-ws
+ *
+ * Use gwsocket http://gwsocket.io/ to give WebSocket server ability
+ * to QuickJS. https://github.com/DesWurstes/utf.js is used to handle
+ * UTF8.
+ *
+ * The server responds to new connections by announcing to all clients.
+ * Messages from a client are echoed, prepended with "You said:"
+ */
+
+import * as os   from "os";
+import * as std  from "std";
+import * as utf  from "./utf.mjs";
+
+console.log("qjs-ws");
+
+/* Create a pair of pipes. pipe1 will be the stdin to gwsocket, and
+ * pipe2 will be its stdout. exec does a fork and exec. gwsocket is
+ * passed the --strict option, which encapsulates each packet with a
+ * 12 byte header (client/type/payload length). Each of these is 4 bytes
+ * in length, in network byte order (big endian). --std uses stdin and
+ * stdout as the source and destination of the encapsulated packets.
+ * --port set the listening port (all interfaces). access-log allows for
+ * an access log to be maintained.
+ *
+ * We can then use setReadHandler() to read asynchronously, or just
+ * read (blocking). It is probably safe to assume that blocking writes
+ * are "ok". If not, use setWriteHandler().
+ */ 
+var pipe1 = os.pipe(); /* gwsocket stdin */
+var pipe2 = os.pipe(); /* gwsocket stdout */
+var pid = os.exec([
+  "gwsocket",
+    // "--access-log=/dev/stderr",
+    // "--addr=localhost",
+    "--port=6789",
+    "--strict",
+    "--std"
+], {
+  block:   false,
+  usePath: false,
+  // Edit to reflect the location of gwsocket
+  file:    "/usr/local/bin/gwsocket",
+  stdin:   pipe1[0],
+  stdout:  pipe2[1]
+});
+
+var wr = std.fdopen(pipe1[1], "w");
+var rd = std.fdopen(pipe2[0], "r");
+
+function write_message(wr, m) {
+  function write4(v) {
+    wr.putByte((v >> 24) & 0xFF);
+    wr.putByte((v >> 16) & 0xFF);
+    wr.putByte((v >> 8) & 0xFF);
+    wr.putByte(v & 0xFF);
+  }
+  write4(m.client);
+  write4(m.type);
+  write4(m.data.byteLength);
+  wr.write(m.data, 0, m.data.byteLength);
+  wr.flush();
+}
+
+function read_message(rd) {
+  function read4() {
+    var b1, b2, b3, b4;
+    b1 = rd.getByte();
+    b2 = rd.getByte();
+    b3 = rd.getByte();
+    b4 = rd.getByte();
+    return (b1 << 24) | (b2 << 16) | (b3 << 8) | b4;
+  }
+  var client = read4();
+  var type = read4();
+  var len = read4();
+  var data = new ArrayBuffer(len);
+  rd.read(data, 0, len);
+  return {
+    client: client,
+    type:   type,
+    data:   data
+  };
+}
+
+const BROADCAST = 0;
+
+const TEXT  = 1;
+const BIN   = 2;
+const CLOSE = 8;
+const PING  = 9;
+const PONG  = 10;
+const OPEN  = 16;
+
+var clients = [];
+
+function typedArrayToBuffer(array) {
+  return array.buffer.slice(array.byteOffset,
+                            array.byteLength + array.byteOffset);
+}
+    
+function handle_message() {
+  var s, t, m, u;
+
+  m = read_message(rd);
+  console.log(m.client, m.type, m.data.byteLength);
+
+  switch (m.type) {
+  case TEXT:
+    s = utf.ToString(utf.FromUTF8(new Uint8Array(m.data)));
+    print("TEXT", s);
+    u = typedArrayToBuffer(utf.ToUTF8(utf.FromString("You said: " + s)));
+    t = {
+      client: m.client,
+      type:   TEXT,
+      data:   u
+    };
+    write_message(wr, t);
+    break;
+  case BIN:
+    print("BIN");
+    break;
+  case CLOSE:
+    print("CLOSE");
+    delete clients[m.client];
+    break;
+  case PING:
+    print("PING");
+    break;
+  case PONG:
+    print("PONG");
+    break;
+  case OPEN:
+    print("OPEN");
+    s = utf.ToString(utf.FromUTF8(new Uint8Array(m.data)));
+    clients[m.client] = s; 
+    u = typedArrayToBuffer(utf.ToUTF8(utf.FromString(
+      "Client from " + s + " connected")));
+    t = {
+      client: BROADCAST,
+      type:   TEXT,
+      data:   u
+    };
+    write_message(wr, t);
+    break;
+  default:
+    print("???");
+    break;
+  }
+}
+
+os.setReadHandler(pipe2[0], function() {
+  handle_message();
+});
+
+console.log("This line appears first, because the read runs asynchronously");
+
+/* ce: .mecmascript; */

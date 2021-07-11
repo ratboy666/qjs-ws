@@ -15,5 +15,7 @@ server capability to shell and scripting languages.
 
 ## TODO ##
 
-Wrap up in module. Add WebSocket client capability.
+Wrap up in module. Add WebSocket client capability. Looking at
+websocat to provide WebSocket client capability. Appears to be a
+reasonable choice.
 
